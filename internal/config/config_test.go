@@ -476,3 +476,12 @@ func TestTalkGainIsMinusTwelveToTwelveInStepsOfThree(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamIdleTimeoutIsTwoToSixtySecondsOrUnset(t *testing.T) {
+	for v, ok := range map[int]bool{0: true, 2: true, 12: true, 60: true, 1: false, 61: false, -5: false} {
+		c := Config{Cameras: []Camera{{Name: "a", Address: "192.0.2.1", Streams: []string{"main"}, StreamIdleTimeout: v}}}
+		if err := c.Validate(); (err == nil) != ok {
+			t.Errorf("stream_idle_timeout %d: %v", v, err)
+		}
+	}
+}

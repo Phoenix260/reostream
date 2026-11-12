@@ -70,6 +70,16 @@ type Camera struct {
 	// whatever it is set to. A tester found full scale overdrove an E1
 	// Zoom's speaker and -12 dB was clear and plenty loud.
 	TalkGainDB int `toml:"talk_gain_db"`
+
+	// StreamIdleTimeout is how many seconds a stream that is already
+	// carrying video may go without hearing from the camera before it is
+	// dropped and reconnected. 0 (the default) keeps the built-in 4 s,
+	// right for a camera on its own. A camera behind a Home Hub or NVR can
+	// stutter for several seconds when the hub is busy, and at 4 s each
+	// stutter becomes a reconnect; a hub that is struggling then gets a new
+	// session every 20 to 40 s and never settles (a front doorbell on a
+	// Home Hub looped like that for 7 hours, 11-11). 2 to 60.
+	StreamIdleTimeout int `toml:"stream_idle_timeout"`
 }
 
 // RTSPConfig configures the RTSP listener. Its absence turns RTSP off
@@ -401,6 +411,9 @@ func (c *Config) Validate() error {
 		}
 		if g := cam.TalkGainDB; g < -12 || g > 12 || g%3 != 0 {
 			return fmt.Errorf("camera %q: talk_gain_db is %d; use -12 to 12 in steps of 3", cam.Name, g)
+		}
+		if t := cam.StreamIdleTimeout; t != 0 && (t < 2 || t > 60) {
+			return fmt.Errorf("camera %q: stream_idle_timeout is %d; use 2 to 60 seconds, or leave it out for the default", cam.Name, t)
 		}
 		if cam.AlwaysOn && cam.UID == "" {
 			return fmt.Errorf("camera %q: always_on is for a battery camera, one with a uid", cam.Name)

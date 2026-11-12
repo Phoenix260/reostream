@@ -123,6 +123,11 @@ type Config struct {
 	// is holding a session and is quicker to retry than to wait out.
 	IdleTimeout time.Duration
 
+	// StreamingIdleTimeout overrides streamingIdleTimeout, the idle timeout
+	// once video is flowing (the camera's stream_idle_timeout). Zero means
+	// the default.
+	StreamingIdleTimeout time.Duration
+
 	// Sink, when non-nil, receives every decoded frame before muxing. Nil
 	// is the default and the only state the HTTP output has ever run in.
 	Sink FrameSink
@@ -417,7 +422,11 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 						// still delivering an unusable stream.
 						lastMedia = time.Now()
 						if !gotVideo && streaming {
-							conn.SetIdleTimeout(streamingIdleTimeout)
+							idle := streamingIdleTimeout
+							if cfg.StreamingIdleTimeout > 0 {
+								idle = cfg.StreamingIdleTimeout
+							}
+							conn.SetIdleTimeout(idle)
 						}
 						gotVideo = true
 						if mux == nil {

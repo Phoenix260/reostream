@@ -246,6 +246,8 @@ func newEntry(cam config.Camera, st string) *entry {
 
 			HoldPicture: cam.HoldPicture,
 			Rotate:      cam.Rotate,
+
+			StreamingIdleTimeout: time.Duration(cam.StreamIdleTimeout) * time.Second,
 		},
 		h:        h,
 		stat:     StreamStat{Camera: cam.Name, Stream: st, OnDemand: onDemand},
@@ -604,6 +606,7 @@ func sameStream(e *entry, cam config.Camera) bool {
 		e.cfg.UID == cam.UID &&
 		e.cfg.Username == cam.Username &&
 		e.cfg.Password == cam.Password &&
+		e.cfg.StreamingIdleTimeout == time.Duration(cam.StreamIdleTimeout)*time.Second &&
 		slices.Contains(cam.RTSP, e.cfg.Stream) == slices.Contains(e.rtsp, e.cfg.Stream)
 }
 

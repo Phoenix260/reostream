@@ -399,6 +399,25 @@ hold_picture = true
 It is off by default, because a frozen picture also hides a real outage. The control page
 still shows the camera as disconnected while it holds.
 
+### A camera behind a busy hub
+
+Once a stream is carrying video, reostream drops it and reconnects if the camera sends
+nothing for 4 s. That is right for a camera on its own, but a camera behind a Home Hub or
+NVR can stutter for several seconds when the hub is busy, and each stutter becomes a
+reconnect. A hub that is already struggling then gets a new session every 20 to 40 s and
+may never settle. Give such a camera more slack with `stream_idle_timeout`, in seconds
+(2 to 60):
+
+```toml
+[[camera]]
+name = "front_doorbell"
+# ...
+stream_idle_timeout = 12
+```
+
+A dead stream is then noticed after 12 s instead of 4 s. Changing it restarts that
+camera's streams on the next config reload.
+
 ### Two-way audio
 
 On a camera with a speaker, each RTSP stream also offers a back channel (the RTSP
