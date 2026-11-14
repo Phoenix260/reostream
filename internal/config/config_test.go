@@ -485,3 +485,12 @@ func TestStreamIdleTimeoutIsTwoToSixtySecondsOrUnset(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionMaxAgeIsOneTo1440MinutesOrUnset(t *testing.T) {
+	for v, ok := range map[int]bool{0: true, 1: true, 25: true, 1440: true, -1: false, 1441: false} {
+		c := Config{Cameras: []Camera{{Name: "a", Address: "192.0.2.1", Streams: []string{"main"}, SessionMaxAge: v}}}
+		if err := c.Validate(); (err == nil) != ok {
+			t.Errorf("session_max_age %d: %v", v, err)
+		}
+	}
+}

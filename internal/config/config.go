@@ -80,6 +80,16 @@ type Camera struct {
 	// session every 20 to 40 s and never settles (a front doorbell on a
 	// Home Hub looped like that for 7 hours, 11-11). 2 to 60.
 	StreamIdleTimeout int `toml:"stream_idle_timeout"`
+
+	// SessionMaxAge is how many minutes a stream keeps one session before
+	// reostream ends it and reconnects on its own, at once, with no
+	// backoff. 0 (the default) never does. A Home Hub cuts each camera's
+	// session on a fixed timer (about 28 min 10 s, seen 11-11 to 11-14):
+	// it goes silent, and the idle timeout and reconnect after it cost
+	// 15 s or more of picture every time. Ending the session a little
+	// before the hub does turns that into a reconnect of a second or two
+	// at a moment reostream picks. 1 to 1440.
+	SessionMaxAge int `toml:"session_max_age"`
 }
 
 // RTSPConfig configures the RTSP listener. Its absence turns RTSP off
@@ -414,6 +424,9 @@ func (c *Config) Validate() error {
 		}
 		if t := cam.StreamIdleTimeout; t != 0 && (t < 2 || t > 60) {
 			return fmt.Errorf("camera %q: stream_idle_timeout is %d; use 2 to 60 seconds, or leave it out for the default", cam.Name, t)
+		}
+		if m := cam.SessionMaxAge; m != 0 && (m < 1 || m > 1440) {
+			return fmt.Errorf("camera %q: session_max_age is %d; use 1 to 1440 minutes, or leave it out to keep sessions as long as the camera does", cam.Name, m)
 		}
 		if cam.AlwaysOn && cam.UID == "" {
 			return fmt.Errorf("camera %q: always_on is for a battery camera, one with a uid", cam.Name)

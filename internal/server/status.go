@@ -66,6 +66,7 @@ type StreamStatus struct {
 	Clients             int     `json:"clients"`
 	DroppedClients      int     `json:"dropped_clients"`
 	Restarts            int     `json:"restarts"`
+	Rotations           int     `json:"rotations"`
 	LastError           string  `json:"last_error,omitempty"`
 	LastErrorAgeSeconds float64 `json:"last_error_age_seconds,omitempty"`
 	FPS                 float64 `json:"fps"`
@@ -127,6 +128,7 @@ func (s *Server) StreamStats() map[string]StreamStatus {
 		if sup, ok := bySup[name]; ok {
 			st.Connected = sup.Running
 			st.Restarts = sup.Restarts
+			st.Rotations = sup.Rotations
 			st.OnDemand = sup.OnDemand
 			st.Privacy = sup.Privacy
 			st.LastError = sup.LastError
@@ -213,6 +215,11 @@ func (s *Server) serveMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounterHeader(&b, "reostream_stream_restarts_total", "Times the stream has reconnected after a failure, since start.")
 	for _, name := range names {
 		fmt.Fprintf(&b, "reostream_stream_restarts_total{stream=%q} %d\n", name, stats[name].Restarts)
+	}
+
+	writeCounterHeader(&b, "reostream_stream_rotations_total", "Sessions ended on schedule (session_max_age) and reconnected, since start.")
+	for _, name := range names {
+		fmt.Fprintf(&b, "reostream_stream_rotations_total{stream=%q} %d\n", name, stats[name].Rotations)
 	}
 
 	writeGaugeHeader(&b, "reostream_stream_fps", "Video frames per second, averaged over the last measurement window.")

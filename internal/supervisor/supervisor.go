@@ -73,6 +73,9 @@ type StreamStat struct {
 	LastError   string
 	LastErrorAt time.Time
 	Restarts    int
+	// Rotations counts sessions ended on schedule (session_max_age). They
+	// are not failures, so they stay out of Restarts and LastError.
+	Rotations int
 	// OnDemand marks a battery camera's stream, which is asleep rather
 	// than down when it is not running.
 	OnDemand bool
@@ -248,6 +251,7 @@ func newEntry(cam config.Camera, st string) *entry {
 			Rotate:      cam.Rotate,
 
 			StreamingIdleTimeout: time.Duration(cam.StreamIdleTimeout) * time.Second,
+			MaxSessionAge:        time.Duration(cam.SessionMaxAge) * time.Minute,
 		},
 		h:        h,
 		stat:     StreamStat{Camera: cam.Name, Stream: st, OnDemand: onDemand},
@@ -607,6 +611,7 @@ func sameStream(e *entry, cam config.Camera) bool {
 		e.cfg.Username == cam.Username &&
 		e.cfg.Password == cam.Password &&
 		e.cfg.StreamingIdleTimeout == time.Duration(cam.StreamIdleTimeout)*time.Second &&
+		e.cfg.MaxSessionAge == time.Duration(cam.SessionMaxAge)*time.Minute &&
 		slices.Contains(cam.RTSP, e.cfg.Stream) == slices.Contains(e.rtsp, e.cfg.Stream)
 }
 
@@ -748,6 +753,16 @@ func (s *Supervisor) runStream(ctx context.Context, e *entry) {
 		err := s.run(ctx, e.cfg, e.h)
 		close(running)
 		ran := time.Since(start)
+
+		if errors.Is(err, stream.ErrSessionRotated) && ctx.Err() == nil {
+			// Planned: straight back in, no backoff, not a failure.
+			s.mu.Lock()
+			e.stat.Running = false
+			e.stat.Rotations++
+			s.mu.Unlock()
+			backoff = s.backoffStart
+			continue
+		}
 		s.setResult(e, err)
 
 		if errors.Is(err, stream.ErrPrivacy) && ctx.Err() == nil {

@@ -138,6 +138,8 @@ func applyCameraForm(cfg *config.Config, form url.Values) error {
 		cam.AlwaysOn = existing.AlwaysOn
 		cam.Rotate = existing.Rotate
 		cam.TalkGainDB = existing.TalkGainDB
+		cam.StreamIdleTimeout = existing.StreamIdleTimeout
+		cam.SessionMaxAge = existing.SessionMaxAge
 		if cam.UID == "" {
 			cam.UID = existing.UID
 		}
@@ -326,6 +328,12 @@ func cameraBlockText(cam config.Camera) string {
 	}
 	if cam.TalkGainDB != 0 {
 		fmt.Fprintf(&b, "talk_gain_db = %d\n", cam.TalkGainDB)
+	}
+	if cam.StreamIdleTimeout != 0 {
+		fmt.Fprintf(&b, "stream_idle_timeout = %d\n", cam.StreamIdleTimeout)
+	}
+	if cam.SessionMaxAge != 0 {
+		fmt.Fprintf(&b, "session_max_age = %d\n", cam.SessionMaxAge)
 	}
 	return b.String()
 }

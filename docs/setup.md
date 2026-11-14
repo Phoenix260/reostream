@@ -418,6 +418,23 @@ stream_idle_timeout = 12
 A dead stream is then noticed after 12 s instead of 4 s. Changing it restarts that
 camera's streams on the next config reload.
 
+A Home Hub also ends each camera's session on a fixed timer, about every 28 minutes: the
+camera goes silent, and the idle timeout above plus the reconnect cost 15 s or more of
+picture each time. `session_max_age`, in minutes (1 to 1440), ends the session a little
+before the hub would, straight after a keyframe, and reconnects at once:
+
+```toml
+[[camera]]
+name = "front_doorbell"
+# ...
+session_max_age = 25
+```
+
+These planned reconnects are counted as `rotations` on the status page and in
+`reostream_stream_rotations_total`, not as restarts, so `restarts` stays a count of real
+failures. Pair it with `hold_picture = true` so RTSP readers see the last picture, not a
+gap, for the second or two the new session takes.
+
 ### Two-way audio
 
 On a camera with a speaker, each RTSP stream also offers a back channel (the RTSP

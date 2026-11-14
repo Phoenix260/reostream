@@ -103,3 +103,27 @@ func TestStreamingIdleTimeoutFromConfigWins(t *testing.T) {
 		t.Fatal("Run still waiting 5 s past the camera's own 3 s idle timeout")
 	}
 }
+
+// session_max_age ends a session once it is old enough, on a keyframe, or
+// rotateKeyGrace later if none comes; never when it is unset.
+func TestShouldRotate(t *testing.T) {
+	first := time.Unix(1000, 0)
+	age := 25 * time.Minute
+	for _, c := range []struct {
+		maxAge  time.Duration
+		elapsed time.Duration
+		key     bool
+		want    bool
+	}{
+		{0, 24 * time.Hour, true, false},
+		{age, age - time.Second, true, false},
+		{age, age, false, false},
+		{age, age, true, true},
+		{age, age + rotateKeyGrace - time.Second, false, false},
+		{age, age + rotateKeyGrace, false, true},
+	} {
+		if got := shouldRotate(c.maxAge, first, first.Add(c.elapsed), c.key); got != c.want {
+			t.Errorf("shouldRotate(%s, elapsed %s, key %v) = %v, want %v", c.maxAge, c.elapsed, c.key, got, c.want)
+		}
+	}
+}

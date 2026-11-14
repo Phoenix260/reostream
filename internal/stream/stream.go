@@ -128,6 +128,12 @@ type Config struct {
 	// the default.
 	StreamingIdleTimeout time.Duration
 
+	// MaxSessionAge ends the session with ErrSessionRotated once it has
+	// carried video this long (the camera's session_max_age), so the
+	// supervisor reconnects at once, before a hub cuts the session on its
+	// own timer. Zero never does.
+	MaxSessionAge time.Duration
+
 	// Sink, when non-nil, receives every decoded frame before muxing. Nil
 	// is the default and the only state the HTTP output has ever run in.
 	Sink FrameSink
@@ -349,6 +355,10 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 	var reportedHeld uint64
 	var heldLogged time.Time
 	lastPing := time.Now()
+	// When video first arrived on this session, for MaxSessionAge.
+	var firstVideo time.Time
+	// sentKey is a keyframe published from the message just handled.
+	sentKey := false
 
 	// On a connection of its own, a camera that goes quiet is caught by
 	// the connection's idle timeout. A stream sharing a recorder's
@@ -427,6 +437,9 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 								idle = cfg.StreamingIdleTimeout
 							}
 							conn.SetIdleTimeout(idle)
+						}
+						if !gotVideo {
+							firstVideo = lastMedia
 						}
 						gotVideo = true
 						if mux == nil {
@@ -512,6 +525,7 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 							// this raw elementary stream directly rather
 							// than decoding it: see hub.SetKeyframe.
 							h.SetKeyframe(f.Codec, f.Video())
+							sentKey = true
 						}
 
 					case baichuan.FrameInfo:
@@ -581,6 +595,14 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 			// sees conn.Messages() close first because the idle timeout got
 			// there sooner. See DefaultMediaTimeout for why the two do not
 			// need to race each other.
+			// Preferably right after a keyframe has gone out, so every
+			// reader holds a whole fresh picture to show while the next
+			// session starts (see shouldRotate).
+			if gotVideo && shouldRotate(cfg.MaxSessionAge, firstVideo, now, sentKey) {
+				return fmt.Errorf("stream: %s: %w after %s", cfg.Name, ErrSessionRotated, now.Sub(firstVideo).Round(time.Second))
+			}
+			sentKey = false
+
 			if now.Sub(lastMedia) >= mediaTimeout {
 				if zoom && !gotVideo {
 					useZoomOverRTSP(cfg.Name, cfg.Stream)
@@ -596,6 +618,23 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 // without a real connection or a live camera clock.
 func shouldPing(last, now time.Time, every time.Duration) bool {
 	return now.Sub(last) >= every
+}
+
+// rotateKeyGrace is how long past MaxSessionAge a session waits for a
+// keyframe to end on before it ends anyway, for a camera whose keyframes
+// are far apart or have stopped.
+const rotateKeyGrace = 5 * time.Second
+
+// shouldRotate reports whether a session that first carried video at
+// first should end now for MaxSessionAge: once it is old enough and a
+// keyframe has just gone out, or rotateKeyGrace later without one. Pulled
+// out of Run, like shouldPing, so it can be tested without a camera.
+func shouldRotate(maxAge time.Duration, first, now time.Time, sentKey bool) bool {
+	if maxAge <= 0 {
+		return false
+	}
+	age := now.Sub(first)
+	return age >= maxAge && (sentKey || age >= maxAge+rotateKeyGrace)
 }
 
 // droppedEarlyAudio reports whether an audio frame that arrived before any
@@ -673,6 +712,11 @@ func dropZoomOverRTSP(name, stream string) {
 // off, which retrying every few seconds will not change, so the supervisor
 // waits longer before the next attempt (see retryAfter).
 var ErrZoomUnavailable = errors.New("the camera sent no zoom video over Baichuan or RTSP")
+
+// ErrSessionRotated is a stream ended on purpose because its session
+// reached MaxSessionAge. The supervisor reconnects it at once, without
+// backoff, and does not count it as a failure.
+var ErrSessionRotated = errors.New("session ended on schedule (session_max_age)")
 
 // ErrPrivacy is a stream that cannot run because the camera is in privacy
 // mode (E1 series): it turns down the preview with status 425, or reports

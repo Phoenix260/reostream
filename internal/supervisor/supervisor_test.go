@@ -315,3 +315,31 @@ func TestZoomUnavailableWaitsLonger(t *testing.T) {
 		t.Fatalf("retryAfter for another error = %s, want the backoff", got)
 	}
 }
+
+// A session ended on schedule (stream.ErrSessionRotated) is reconnected at
+// once, with no backoff, and counted as a rotation: not a restart and not a
+// last_error, so a stream rotating every 25 minutes still reads healthy.
+func TestARotatedSessionReconnectsAtOnceAndIsNotAFailure(t *testing.T) {
+	var attempts int32
+	run := func(ctx context.Context, cfg stream.Config, h *hub.Hub) error {
+		if atomic.AddInt32(&attempts, 1) <= 3 {
+			return fmt.Errorf("stream: a: %w after 25m0s", stream.ErrSessionRotated)
+		}
+		<-ctx.Done()
+		return nil
+	}
+	s := New([]config.Camera{{Name: "a", Address: "192.0.2.1", Streams: []string{"main"}, SessionMaxAge: 25}}, run)
+	// A backoff this long would leave time for one attempt only.
+	s.setBackoff(10*time.Second, 10*time.Second, time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	s.Run(ctx)
+
+	if n := atomic.LoadInt32(&attempts); n != 4 {
+		t.Fatalf("ran %d times, want 4: three rotations reconnected at once, then a run that lasts", n)
+	}
+	st := s.Stats()[0]
+	if st.Rotations != 3 || st.Restarts != 0 || st.LastError != "" {
+		t.Errorf("rotations %d, restarts %d, last error %q; want 3, 0 and none", st.Rotations, st.Restarts, st.LastError)
+	}
+}
