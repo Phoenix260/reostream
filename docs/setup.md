@@ -432,7 +432,11 @@ session_max_age = 25
 
 These planned reconnects are counted as `rotations` on the status page and in
 `reostream_stream_rotations_total`, not as restarts, so `restarts` stays a count of real
-failures. Pair it with `hold_picture = true` so RTSP readers see the last picture, not a
+failures. Behind a hub, streams share a connection, and the hub's timer runs on that
+connection's login, not on any one stream. So the age counts from the login, and a
+rotation retires it: each stream moves to a fresh login as it rotates, and the old
+connection closes once the last one has left. If `restarts` climbs about as fast as
+`rotations`, the streams are still landing on a login the hub cuts. Pair it with `hold_picture = true` so RTSP readers see the last picture, not a
 gap, for the second or two the new session takes.
 
 ### Two-way audio

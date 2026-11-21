@@ -131,7 +131,9 @@ type Config struct {
 	// MaxSessionAge ends the session with ErrSessionRotated once it has
 	// carried video this long (the camera's session_max_age), so the
 	// supervisor reconnects at once, before a hub cuts the session on its
-	// own timer. Zero never does.
+	// own timer. Zero never does. On a connection shared behind a Home
+	// Hub the age is the connection's login, and a rotation retires that
+	// login so the reconnect logs in afresh (see baichuan.Sub.Retire).
 	MaxSessionAge time.Duration
 
 	// Sink, when non-nil, receives every decoded frame before muxing. Nil
@@ -598,8 +600,22 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 			// Preferably right after a keyframe has gone out, so every
 			// reader holds a whole fresh picture to show while the next
 			// session starts (see shouldRotate).
-			if gotVideo && shouldRotate(cfg.MaxSessionAge, firstVideo, now, sentKey) {
-				return fmt.Errorf("stream: %s: %w after %s", cfg.Name, ErrSessionRotated, now.Sub(firstVideo).Round(time.Second))
+			//
+			// Behind a Home Hub the session is the shared connection's
+			// login, not this stream: the Hub cuts the login on its own
+			// timer however recently this stream joined it. So the age
+			// is the login's, and ending it retires the login, so the
+			// supervisor's reconnect logs in afresh instead of
+			// subscribing again on the login the Hub is about to cut.
+			sessionStart := firstVideo
+			if sub != nil {
+				sessionStart = sub.SessionStart()
+			}
+			if gotVideo && shouldRotate(cfg.MaxSessionAge, sessionStart, now, sentKey) {
+				if sub != nil {
+					sub.Retire()
+				}
+				return fmt.Errorf("stream: %s: %w after %s", cfg.Name, ErrSessionRotated, now.Sub(sessionStart).Round(time.Second))
 			}
 			sentKey = false
 

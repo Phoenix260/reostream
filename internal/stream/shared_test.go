@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -114,4 +115,48 @@ func TestRunRecorderSharingOff(t *testing.T) {
 	if n := nvr.Accepts(); n != 2 {
 		t.Fatalf("recorder accepted %d connections, want 2", n)
 	}
+}
+
+// session_max_age behind a Home Hub: the Hub cuts the shared connection's
+// login on its own timer, so a rotation has to log in again. Reconnecting
+// onto the same login (11-20: rotations about equal to restarts in /metrics)
+// just let the Hub cut the new session too.
+func TestRunRotationBehindAHubLogsInAgain(t *testing.T) {
+	nvr := fakenvr.New(t, h265Fixture(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A second camera on the same login, as the garage and doorbells are.
+	other := hub.New(64)
+	otherCh, cancelOther := other.Subscribe()
+	defer cancelOther()
+	go Run(ctx, Config{Name: "other", Address: nvr.Addr(), Channel: 2, Stream: "sub"}, other)
+	waitForChunk(t, "other", otherCh)
+
+	cfg := Config{Name: "rotating", Address: nvr.Addr(), Channel: 1, Stream: "sub", MaxSessionAge: 300 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, cfg, hub.New(64)) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSessionRotated) {
+			t.Fatalf("Run returned %v, want ErrSessionRotated", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("session never rotated")
+	}
+	if n := nvr.Accepts(); n != 1 {
+		t.Fatalf("recorder accepted %d connections before the reconnect, want 1", n)
+	}
+
+	h := hub.New(64)
+	ch, cancelSub := h.Subscribe()
+	defer cancelSub()
+	cfg.MaxSessionAge = 0
+	go Run(ctx, cfg, h)
+	waitForChunk(t, "rotating, reconnected", ch)
+	if n := nvr.Accepts(); n != 2 {
+		t.Fatalf("recorder accepted %d connections after a rotation, want 2 (a fresh login)", n)
+	}
+	// The other camera, still on the old login, keeps streaming.
+	waitForChunk(t, "other", otherCh)
 }

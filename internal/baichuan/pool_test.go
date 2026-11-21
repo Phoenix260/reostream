@@ -199,6 +199,48 @@ func TestPoolStopsAStreamWithItsLastReaderAndClosesWhenIdle(t *testing.T) {
 	}
 }
 
+// session_max_age behind a Home Hub: the Hub cuts a login on its own timer,
+// so a stream ending its session on schedule must come back on a new login,
+// not subscribe again on the one about to be cut. The streams still on the
+// old login keep going until they rotate too, and the old connection closes
+// once the last of them has left.
+func TestPoolRetiredLoginTakesNoNewStreams(t *testing.T) {
+	nvr := fakenvr.New(t, h265Capture(t))
+	p := baichuan.NewPool()
+	a := openSub(t, p, nvr.Addr(), 1, baichuan.StreamMain)
+	b := openSub(t, p, nvr.Addr(), 2, baichuan.StreamSub)
+	frames(t, a, 1, baichuan.StreamMain, 3)
+	born := a.SessionStart()
+	if !b.SessionStart().Equal(born) {
+		t.Fatalf("two streams on one connection report different logins")
+	}
+
+	a.Retire()
+	a.Close()
+	a2 := openSub(t, p, nvr.Addr(), 1, baichuan.StreamMain)
+	frames(t, a2, 1, baichuan.StreamMain, 3)
+	if n := nvr.Accepts(); n != 2 {
+		t.Fatalf("recorder accepted %d connections after a rotation, want 2 (a fresh login)", n)
+	}
+	if !a2.SessionStart().After(born) {
+		t.Fatalf("rotated stream reports the old login")
+	}
+	// The stream left on the retired login is undisturbed.
+	frames(t, b, 2, baichuan.StreamSub, 5)
+
+	// A stream that fails and comes back also avoids the retired login.
+	c := openSub(t, p, nvr.Addr(), 3, baichuan.StreamSub)
+	if !c.SessionStart().Equal(a2.SessionStart()) {
+		t.Fatalf("new stream joined the retired login")
+	}
+
+	b.Close()
+	waitFor(t, func() bool { return nvr.Open() == 1 }, "the retired connection to close with its last stream")
+	if n := p.Connections(); n != 1 {
+		t.Fatalf("pool holds %d connections, want 1", n)
+	}
+}
+
 // A channel whose camera goes dark leaves the others streaming: its reader
 // is free to give up and come back on the same connection.
 func TestPoolOneChannelGoingDarkLeavesTheOthers(t *testing.T) {

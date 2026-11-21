@@ -109,16 +109,17 @@ func (p *Pool) Open(ctx context.Context, addr string, opts Options, channel int,
 		// A stream another reader already has costs the recorder nothing
 		// more, wherever it is; a new one goes on the first connection
 		// with room.
+		// A retired connection (see Sub.Retire) takes nothing new.
 		var pick *Shared
 		for _, s := range g.conns {
-			if s.has(channel, stream) {
+			if !s.Retired() && s.has(channel, stream) {
 				pick = s
 				break
 			}
 		}
 		if pick == nil {
 			for _, s := range g.conns {
-				if s.Previews() < max {
+				if !s.Retired() && s.Previews() < max {
 					pick = s
 					break
 				}

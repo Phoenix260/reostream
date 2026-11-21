@@ -42,6 +42,16 @@ type Shared struct {
 
 	done chan struct{}
 
+	// born is when the connection logged in. A Home Hub ends a login on
+	// its own timer (about 28 min), whatever streams come and go on it, so
+	// session_max_age is measured from here, not from when a stream joined.
+	born time.Time
+	// retired is set when a stream ends its session on schedule: the
+	// connection takes no new streams, so the one that retired it, and
+	// each one after it, comes back on a fresh login, and the connection
+	// closes once its last stream has moved (see onIdle).
+	retired bool
+
 	// onIdle is told when the last preview closes, so whatever holds this
 	// connection can decide whether to close it. See Pool.
 	onIdle func(*Shared)
@@ -95,6 +105,7 @@ func NewShared(conn *Conn, sup Support, supErr error) *Shared {
 		supErr:   supErr,
 		previews: map[previewKey]*preview{},
 		done:     make(chan struct{}),
+		born:     time.Now(),
 	}
 	go s.demux()
 	go s.ping()
@@ -126,6 +137,13 @@ func (s *Shared) Closed() bool {
 	return s.closed
 }
 
+// Retired reports whether the connection has stopped taking new streams.
+func (s *Shared) Retired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retired
+}
+
 // Done closes when the connection ends.
 func (s *Shared) Done() <-chan struct{} { return s.done }
 
@@ -137,7 +155,9 @@ func (s *Shared) Subscribe(channel int, stream string) (*Sub, error) {
 	sub := &Sub{s: s, key: key, msgs: make(chan Message, sharedQueue), quit: make(chan struct{})}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || s.retired {
+		// A retired connection is on its way out: the caller (Pool.Open)
+		// looks again and lands on a fresh login.
 		return nil, ErrSharedClosed
 	}
 	p := s.previews[key]
@@ -385,6 +405,19 @@ func (r *Sub) Support() (Support, error) { return r.s.sup, r.s.supErr }
 
 // Ping does nothing: the shared connection pings itself.
 func (r *Sub) Ping() error { return nil }
+
+// SessionStart is when the connection under this reader logged in.
+func (r *Sub) SessionStart() time.Time { return r.s.born }
+
+// Retire ends the login under this reader on schedule: the connection
+// takes no new streams, so the reader's next Open logs in afresh, and it
+// closes once every stream on it has closed. Reusing the login instead
+// would leave the Hub's own timer running and cut the stream anyway.
+func (r *Sub) Retire() {
+	r.s.mu.Lock()
+	r.s.retired = true
+	r.s.mu.Unlock()
+}
 
 // Close stops reading. The stream itself stops only when its last reader
 // closes, and the connection stays up for the others.
