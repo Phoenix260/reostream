@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -143,7 +144,49 @@ type Stream struct {
 	realWall    time.Time
 	held        uint32
 	holdRunning bool
+
+	// Fast start. gop is the video since the last keyframe, kept whether or
+	// not anyone is reading, so a new reader can be sent the current picture
+	// at once instead of waiting up to a whole keyframe interval for the
+	// camera's next one (see replay). gopBytes is its size and gopFull says
+	// it outgrew gopMaxBytes and is skipped until the next keyframe.
+	// nextSeq is the sequence number the next live video packet will carry,
+	// once haveSeq; replayed packets are numbered just before it.
+	gop      []gopFrame
+	gopBytes int
+	gopFull  bool
+	nextSeq  uint16
+	haveSeq  bool
+
+	// writeMu orders live video writes against a replay, so no live packet
+	// is encoded between the replay's snapshot and the reader joining the
+	// stream. Taken before any gortsplib lock, never after.
+	writeMu sync.Mutex
 }
+
+// gopFrame is one video frame held for fast start: its elementary stream
+// and its place on the stream's 90 kHz timeline (without the epoch).
+type gopFrame struct {
+	data []byte
+	ts90 uint64
+}
+
+// fastStart turns the keyframe replay on. REOSTREAM_FAST_START=0 turns it
+// off, which puts back the old behaviour of a new reader waiting for the
+// camera's next keyframe.
+var fastStart = os.Getenv("REOSTREAM_FAST_START") != "0"
+
+// gopMaxBytes caps the held group of pictures. A Reolink sub stream holds a
+// few hundred kB between keyframes and a 4K main stream a few MB; past this
+// the replay would flood a new reader's write queue (writeQueueSize), so it
+// is skipped and the reader waits for a keyframe as before.
+const gopMaxBytes = 6 << 20
+
+// replaySpacing is the gap, in 90 kHz ticks, between replayed frames. The
+// replay is squeezed into the moment before the newest frame so a player
+// decodes through it at once and shows the current picture, rather than
+// playing seconds of the past at normal speed and staying that far behind.
+const replaySpacing = 90
 
 // SetTalker gives the stream a way to reach its camera's speaker.
 func (s *Stream) SetTalker(t Talker) {
@@ -390,6 +433,7 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 	ts90 := s.videoClock.PTS(f.Micros)
 	s.lastVideo, s.lastMicros = ts90, f.Micros
 	epoch := s.epoch90
+	s.keepGOP(f, ts90)
 	s.mu.Unlock()
 
 	if s.readerCount() == 0 {
@@ -404,6 +448,9 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 		return
 	}
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
 	enc, ss, media := s.enc, s.ss, s.video
 	s.packetized++
@@ -416,6 +463,11 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 	if err != nil {
 		return
 	}
+	if len(pkts) > 0 {
+		s.mu.Lock()
+		s.nextSeq, s.haveSeq = pkts[len(pkts)-1].SequenceNumber+1, true
+		s.mu.Unlock()
+	}
 	ntp := ntpOf90(ts90 + epoch)
 	for _, p := range pkts {
 		p.Timestamp = uint32(ts90 + epoch)
@@ -424,6 +476,122 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 		// report's wall time comes from the same timeline as the RTP
 		// timestamp; see ntpOf90.
 		_ = ss.WritePacketRTPWithNTP(media, p, ntp)
+	}
+}
+
+// keepGOP adds a video frame to the group of pictures held for fast start,
+// starting it over at each keyframe. Called with s.mu held.
+func (s *Stream) keepGOP(f baichuan.Frame, ts90 uint64) {
+	if !fastStart {
+		return
+	}
+	if f.Kind == baichuan.FrameIFrame {
+		s.gop, s.gopBytes, s.gopFull = s.gop[:0], 0, false
+	} else if len(s.gop) == 0 || s.gopFull {
+		// No keyframe to start from, or already over the cap.
+		return
+	}
+	v := f.Video()
+	if s.gopBytes+len(v) > gopMaxBytes {
+		s.gop, s.gopBytes, s.gopFull = s.gop[:0], 0, true
+		return
+	}
+	// A copy: the camera reader may reuse the frame's buffer.
+	s.gop = append(s.gop, gopFrame{data: append([]byte(nil), v...), ts90: ts90})
+	s.gopBytes += len(v)
+}
+
+// replay is the server stream's OnReaderActivate: it sends a reader that is
+// starting to play the held group of pictures, through that session alone,
+// and then attaches it to the live stream. Under writeMu nothing live is
+// encoded in between, so the replay's sequence numbers end just before the
+// first live packet the reader gets, and its timestamps just before that
+// packet's too. Anything that does not fit falls back to attaching the
+// reader straight away, which is how every reader started before.
+func (s *Stream) replay(ss *gortsplib.ServerSession, activate func()) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	defer activate()
+
+	s.mu.Lock()
+	gop := append([]gopFrame(nil), s.gop...)
+	media, enc, epoch := s.video, s.enc, s.epoch90
+	next := s.nextSeq
+	if !s.haveSeq {
+		next = nextSequenceNumber(enc)
+	}
+	s.mu.Unlock()
+
+	if !fastStart || len(gop) == 0 || media == nil {
+		return
+	}
+	setup := false
+	for _, m := range ss.Medias() {
+		if m == media {
+			setup = true
+		}
+	}
+	if !setup {
+		return
+	}
+
+	var renc videoEncoder
+	switch v := media.Formats[0].(type) {
+	case *format.H265:
+		e, err := v.CreateEncoder()
+		if err != nil {
+			return
+		}
+		renc = e
+	case *format.H264:
+		e, err := v.CreateEncoder()
+		if err != nil {
+			return
+		}
+		renc = e
+	default:
+		return
+	}
+
+	type au struct {
+		pkts []*rtp.Packet
+		ts   uint64
+	}
+	aus := make([]au, 0, len(gop))
+	total := 0
+	last := gop[len(gop)-1].ts90 + epoch
+	for i, g := range gop {
+		nalus := splitAnnexB(g.data)
+		if len(nalus) == 0 {
+			continue
+		}
+		pkts, err := renc.Encode(nalus)
+		if err != nil {
+			return
+		}
+		back := uint64(len(gop)-1-i) * replaySpacing
+		t := last
+		if back < t {
+			t -= back
+		}
+		aus = append(aus, au{pkts: pkts, ts: t})
+		total += len(pkts)
+	}
+	if total == 0 || total > replayMaxPackets {
+		return
+	}
+
+	seq := next - uint16(total)
+	for _, a := range aus {
+		ntp := ntpOf90(a.ts)
+		for _, p := range a.pkts {
+			p.SequenceNumber = seq
+			seq++
+			p.Timestamp = uint32(a.ts)
+			if err := ss.WritePacketRTPWithNTP(media, p, ntp); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -638,7 +806,7 @@ func (s *Stream) initialize(f baichuan.Frame) error {
 		return nil
 	}
 	if s.srv != nil {
-		ss := &gortsplib.ServerStream{Server: s.srv, Desc: desc}
+		ss := &gortsplib.ServerStream{Server: s.srv, Desc: desc, OnReaderActivate: s.replay}
 		if err := ss.Initialize(); err != nil {
 			return err
 		}
@@ -652,6 +820,10 @@ func (s *Stream) initialize(f baichuan.Frame) error {
 		s.ss = ss
 	}
 	s.desc, s.video, s.enc, s.ready = desc, media, enc, true
+	// A new encoder numbers from its own start, and the held frames may
+	// carry parameter sets the new description no longer has.
+	s.nextSeq, s.haveSeq = 0, false
+	s.gop, s.gopBytes, s.gopFull = nil, 0, false
 	s.audio, s.audioEnc = audioMedia, audioEnc
 	s.back = back
 	if audioMedia != nil {

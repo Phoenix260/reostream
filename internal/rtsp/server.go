@@ -32,6 +32,10 @@ import (
 // tighter, but gortsplib has one size for the whole server.
 const writeQueueSize = 8192
 
+// replayMaxPackets bounds a fast-start replay (see Stream.replay) to half a
+// reader's write queue, leaving the other half for live packets behind it.
+const replayMaxPackets = writeQueueSize / 2
+
 // Server serves camera streams over RTSP.
 //
 // Paths mirror the HTTP endpoints, so a camera reachable at
