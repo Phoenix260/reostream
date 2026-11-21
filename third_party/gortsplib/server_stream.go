@@ -64,6 +64,14 @@ type ServerStream struct {
 	// (optional) Stream-specific Multicast settings.
 	MulticastParams map[*description.Media]StreamMediaMulticastParams
 
+	// OnReaderActivate, when set, is called as a unicast reader starts
+	// playing, in place of attaching it to the stream's packets right away.
+	// The callback must call activate once to attach it. reostream uses the
+	// gap to send a new reader the current group of pictures through the
+	// session alone, so it starts on a keyframe instead of waiting for the
+	// camera's next one. Added for reostream; not upstream.
+	OnReaderActivate func(ss *ServerSession, activate func())
+
 	descMutex            sync.RWMutex
 	mutex                sync.RWMutex
 	readers              map[*ServerSession]struct{}
@@ -377,9 +385,31 @@ func (st *ServerStream) readerSetActive(ss *ServerSession) {
 			streamMedia.multicastWriter.rtcpl.addClient(
 				ss.author.ip(), streamMedia.multicastWriter.rtcpl.port(), sm.readPacketRTCPUDPPlay)
 		}
+	} else if st.OnReaderActivate != nil {
+		// Called without the stream lock: the callback writes to the
+		// session and then attaches it, and the stream's writers take this
+		// lock while the callback's own ordering lock may be held.
+		hook := st.OnReaderActivate
+		st.mutex.Unlock()
+		hook(ss, func() { st.activateReader(ss) })
+		st.mutex.Lock()
 	} else {
 		st.activeUnicastReaders[ss] = struct{}{}
 	}
+}
+
+// activateReader attaches a unicast reader whose start OnReaderActivate
+// deferred, unless the stream closed or the reader left in the meantime.
+func (st *ServerStream) activateReader(ss *ServerSession) {
+	st.mutex.Lock()
+	defer st.mutex.Unlock()
+	if st.closed {
+		return
+	}
+	if _, ok := st.readers[ss]; !ok {
+		return
+	}
+	st.activeUnicastReaders[ss] = struct{}{}
 }
 
 func (st *ServerStream) readerSetInactive(ss *ServerSession) {
