@@ -111,8 +111,9 @@ Also on port 8560:
 | `/<cam>.keyframe` | latest keyframe, raw |
 | `/<cam>.frames` | raw access units with a small header, for your own decoder; see `docs/setup.md` |
 | `/<cam>.still.ts` | the latest keyframe as a one-frame MPEG-TS; never touches the camera |
-| `/api/status` | per-stream JSON: connected, fps, bitrate, clients, reconnects, last error |
+| `/api/status` | per-stream JSON: connected, fps, bitrate, clients, reconnects, last error; plus `fast_start` (on/off, replays per RTSP path, why a reader got none) |
 | `/metrics` | the same for Prometheus |
+| `POST /api/fast_start` | `enabled=0` or `1`: turn the RTSP keyframe replay off or on until restart (behind the stream login). `REOSTREAM_FAST_START=0` starts it off |
 
 ## What it does
 

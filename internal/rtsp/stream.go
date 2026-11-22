@@ -10,9 +10,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
@@ -88,6 +90,10 @@ type Stream struct {
 	// up, or until Frigate's watchdog restarted it. From the wall clock, a
 	// restart is a short gap forward instead.
 	epoch90 uint64
+
+	// fs counts what fast start did for this stream's readers, for
+	// GET /api/status.
+	fs fastStartStats
 
 	mu      sync.Mutex
 	ready   bool
@@ -172,9 +178,22 @@ type gopFrame struct {
 }
 
 // fastStart turns the keyframe replay on. REOSTREAM_FAST_START=0 turns it
-// off, which puts back the old behaviour of a new reader waiting for the
-// camera's next keyframe.
-var fastStart = os.Getenv("REOSTREAM_FAST_START") != "0"
+// off at start-up, which puts back the old behaviour of a new reader waiting
+// for the camera's next keyframe; SetFastStart (POST /api/fast_start) turns
+// it off or on again while running, until the next restart.
+var fastStart = func() *atomic.Bool {
+	var b atomic.Bool
+	b.Store(os.Getenv("REOSTREAM_FAST_START") != "0")
+	return &b
+}()
+
+// SetFastStart turns the keyframe replay on or off for every stream, until
+// the process restarts. Off drops nothing already sent; the held pictures
+// are let go at each stream's next frame.
+func SetFastStart(on bool) { fastStart.Store(on) }
+
+// FastStartEnabled reports whether the keyframe replay is on.
+func FastStartEnabled() bool { return fastStart.Load() }
 
 // gopMaxBytes caps the held group of pictures. A Reolink sub stream holds a
 // few hundred kB between keyframes and a 4K main stream a few MB; past this
@@ -482,7 +501,10 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 // keepGOP adds a video frame to the group of pictures held for fast start,
 // starting it over at each keyframe. Called with s.mu held.
 func (s *Stream) keepGOP(f baichuan.Frame, ts90 uint64) {
-	if !fastStart {
+	if !fastStart.Load() {
+		if len(s.gop) > 0 {
+			s.gop, s.gopBytes, s.gopFull = nil, 0, false
+		}
 		return
 	}
 	if f.Kind == baichuan.FrameIFrame {
@@ -522,7 +544,11 @@ func (s *Stream) replay(ss *gortsplib.ServerSession, activate func()) {
 	}
 	s.mu.Unlock()
 
-	if !fastStart || len(gop) == 0 || media == nil {
+	if !fastStart.Load() {
+		return
+	}
+	if len(gop) == 0 || media == nil {
+		s.fs.skip("no held keyframe yet")
 		return
 	}
 	setup := false
@@ -532,6 +558,7 @@ func (s *Stream) replay(ss *gortsplib.ServerSession, activate func()) {
 		}
 	}
 	if !setup {
+		s.fs.skip("reader did not set up video")
 		return
 	}
 
@@ -578,10 +605,17 @@ func (s *Stream) replay(ss *gortsplib.ServerSession, activate func()) {
 		total += len(pkts)
 	}
 	if total == 0 || total > replayMaxPackets {
+		s.fs.skip(fmt.Sprintf("held pictures too large (%d packets)", total))
 		return
 	}
 
 	seq := next - uint16(total)
+	// The PLAY response's RTP-Info must name the first replayed packet,
+	// not the live position: told the stream starts at the live packet, a
+	// reader such as ffmpeg sees every replayed frame land before its own
+	// start, with no usable timestamp on the keyframe.
+	ss.SetPlayStart(ntpOf90(aus[0].ts), media, seq)
+	s.fs.replayed(len(aus), total, ntpOf90(aus[0].ts), ntpOf90(last))
 	for _, a := range aus {
 		ntp := ntpOf90(a.ts)
 		for _, p := range a.pkts {

@@ -3,11 +3,13 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/VoltTech21/reostream/internal/rtsp"
 	"github.com/VoltTech21/reostream/internal/stream"
 	"github.com/VoltTech21/reostream/internal/supervisor"
 )
@@ -83,6 +85,60 @@ type StreamStatus struct {
 // statusBody is the shape of GET /api/status.
 type statusBody struct {
 	Streams map[string]StreamStatus `json:"streams"`
+	// FastStart is the RTSP keyframe replay's switch and counters, when an
+	// RTSP server is attached (SetFastStarter).
+	FastStart *rtsp.FastStartStatus `json:"fast_start,omitempty"`
+}
+
+// FastStarter is the RTSP server's fast-start control, as /api/status and
+// /api/fast_start use it.
+type FastStarter interface {
+	FastStartStatus() rtsp.FastStartStatus
+	SetFastStart(on bool)
+}
+
+// SetFastStarter attaches the RTSP server so /api/status reports fast start
+// and POST /api/fast_start can switch it. Optional.
+func (s *Server) SetFastStarter(fs FastStarter) {
+	s.fast = fs
+}
+
+func (s *Server) fastStartBody() *rtsp.FastStartStatus {
+	if s.fast == nil {
+		return nil
+	}
+	st := s.fast.FastStartStatus()
+	return &st
+}
+
+// serveFastStart switches the keyframe replay: POST enabled=0 or enabled=1,
+// as a form value or query parameter. It is behind the stream login (only
+// GET /api/status and /metrics are open). The switch lasts until restart;
+// REOSTREAM_FAST_START sets where it starts. The answer is the new
+// fast_start object.
+func (s *Server) serveFastStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.fast == nil {
+		http.Error(w, "fast start needs the [rtsp] output", http.StatusNotFound)
+		return
+	}
+	var on bool
+	switch r.FormValue("enabled") {
+	case "1", "true", "on":
+		on = true
+	case "0", "false", "off":
+	default:
+		http.Error(w, "enabled must be 0 or 1", http.StatusBadRequest)
+		return
+	}
+	s.fast.SetFastStart(on)
+	log.Printf("reostream: fast start turned %s by %s", map[bool]string{true: "on", false: "off"}[on], r.RemoteAddr)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.fastStartBody())
 }
 
 // SetSupervisor attaches sup so status and metrics can report whether each
@@ -168,7 +224,7 @@ func (s *Server) serveStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(statusBody{Streams: s.StreamStats()})
+	json.NewEncoder(w).Encode(statusBody{Streams: s.StreamStats(), FastStart: s.fastStartBody()})
 }
 
 // serveMetrics writes Prometheus text exposition format. It is built by
@@ -215,6 +271,20 @@ func (s *Server) serveMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounterHeader(&b, "reostream_stream_restarts_total", "Times the stream has reconnected after a failure, since start.")
 	for _, name := range names {
 		fmt.Fprintf(&b, "reostream_stream_restarts_total{stream=%q} %d\n", name, stats[name].Restarts)
+	}
+
+	if fs := s.fastStartBody(); fs != nil {
+		writeGaugeHeader(&b, "reostream_fast_start_enabled", "1 if new RTSP readers are sent the held group of pictures.")
+		fmt.Fprintf(&b, "reostream_fast_start_enabled %d\n", boolToInt(fs.Enabled))
+		writeCounterHeader(&b, "reostream_fast_start_replays_total", "RTSP readers sent the held group of pictures, since start.")
+		paths := make([]string, 0, len(fs.Streams))
+		for p := range fs.Streams {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		for _, p := range paths {
+			fmt.Fprintf(&b, "reostream_fast_start_replays_total{path=%q} %d\n", p, fs.Streams[p].Replays)
+		}
 	}
 
 	writeCounterHeader(&b, "reostream_stream_rotations_total", "Sessions ended on schedule (session_max_age) and reconnected, since start.")
