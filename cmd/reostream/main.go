@@ -277,6 +277,7 @@ func startup(configFlag, dataDir, listenOverride, rtspListenOverride, controlLis
 		if streamLogin {
 			rtspSrv.RequireLogin(streamUser, streamPass)
 		}
+		srv.SetFastStarter(rtspSrv)
 	}
 	sup.AttachSinks(func(camera, st string) stream.FrameSink {
 		path := rtsp.Path(camera, st)

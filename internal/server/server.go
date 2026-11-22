@@ -55,6 +55,9 @@ type Server struct {
 	// sup is optional; see SetSupervisor in status.go.
 	sup *supervisor.Supervisor
 
+	// fast is optional; see SetFastStarter in status.go.
+	fast FastStarter
+
 	// wake lets a request subscribe to a battery camera's on-demand hub,
 	// which wakes the camera. Only the signed-in control listener sets it.
 	wake bool
@@ -82,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.serveStatus)
 	mux.HandleFunc("/metrics", s.serveMetrics)
+	mux.HandleFunc("/api/fast_start", s.serveFastStart)
 	// Both stream and keyframe routes are dispatched from one catch-all
 	// rather than two ServeMux patterns: the stdlib mux's {wildcard}
 	// segments have to occupy a whole path segment, so a pattern like

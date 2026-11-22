@@ -14,7 +14,7 @@ func gopFrameOf(kind baichuan.FrameKind, n int) baichuan.Frame {
 // The held group of pictures starts at a keyframe, starts over at the next
 // one, and holds nothing before the first.
 func TestKeepGOPStartsAtKeyframe(t *testing.T) {
-	if !fastStart {
+	if !fastStart.Load() {
 		t.Skip("fast start turned off")
 	}
 	s := &Stream{}
@@ -36,7 +36,7 @@ func TestKeepGOPStartsAtKeyframe(t *testing.T) {
 
 // A group of pictures past the cap is dropped until the next keyframe.
 func TestKeepGOPCap(t *testing.T) {
-	if !fastStart {
+	if !fastStart.Load() {
 		t.Skip("fast start turned off")
 	}
 	s := &Stream{}
@@ -57,7 +57,7 @@ func TestKeepGOPCap(t *testing.T) {
 
 // The held frames are copies, not views of the camera's buffer.
 func TestKeepGOPCopies(t *testing.T) {
-	if !fastStart {
+	if !fastStart.Load() {
 		t.Skip("fast start turned off")
 	}
 	s := &Stream{}

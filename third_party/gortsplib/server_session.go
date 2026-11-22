@@ -240,14 +240,29 @@ func generateRTPInfo(
 	stream *ServerStream,
 	path string,
 	u *base.URL,
+	start *playStart,
 ) headers.RTPInfo {
 	ri := make(headers.RTPInfo, len(mediasOrdered))
 
+	// reostream patch: a session whose OnReaderActivate already sent it
+	// packets (fast start) starts at the first of those, not at the live
+	// position. Every media is described at that same instant so the medias
+	// still agree, and the replayed media gets the replay's first sequence
+	// number.
+	at := now
+	if start != nil {
+		at = start.at
+	}
+
 	for i, sm := range mediasOrdered {
 		ssm := stream.medias[sm.media]
-		entry := ssm.rtpInfoEntry(now)
+		entry := ssm.rtpInfoEntry(at)
 		if entry == nil {
 			entry = &headers.RTPInfoEntry{}
+		}
+		if start != nil && entry.SequenceNumber != nil && start.media == sm.media {
+			seq := start.seq
+			entry.SequenceNumber = &seq
 		}
 
 		entry.URL = (&base.URL{
@@ -261,6 +276,24 @@ func generateRTPInfo(
 	}
 
 	return ri
+}
+
+// playStart is where a reader's stream begins when OnReaderActivate sent it
+// packets before the live ones (reostream patch).
+type playStart struct {
+	at    time.Time
+	media *description.Media
+	seq   uint16
+}
+
+// SetPlayStart (reostream patch) tells the PLAY response that this session's
+// stream begins at the packet with sequence number seq on media, sent with
+// NTP time at, instead of at the next live packet. Call it only from
+// OnReaderActivate, before activate: the RTP-Info header is built right
+// after, on the same goroutine. Without it a reader is told the stream
+// starts after packets it then receives first.
+func (ss *ServerSession) SetPlayStart(at time.Time, media *description.Media, seq uint16) {
+	ss.playStart = &playStart{at: at, media: media, seq: seq}
 }
 
 // ServerSessionState is a state of a ServerSession.
@@ -308,6 +341,10 @@ type sessionRequestReq struct {
 type ServerSession struct {
 	s      *Server
 	author *ServerConn
+
+	// playStart is set by SetPlayStart (reostream patch) and read once, by
+	// the PLAY that called OnReaderActivate.
+	playStart *playStart
 
 	secretID              string // must not be shared, allows to take ownership of the session
 	ctx                   context.Context
@@ -1313,7 +1350,9 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 					ss.setuppedMediasOrdered,
 					ss.setuppedStream,
 					ss.setuppedPath,
-					req.URL)
+					req.URL,
+					ss.playStart)
+				ss.playStart = nil
 
 				if res.Header == nil {
 					res.Header = make(base.Header)
